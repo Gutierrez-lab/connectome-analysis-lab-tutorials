@@ -9,18 +9,19 @@ Functions:
     estimate_T_init       — auto-estimate initial SA temperature
     simulated_annealing   — within-module SA reordering
     plot_adjacency_matrix — heatmap or dot plot of the result
-    run_pipeline          — full pipeline: two dataframes in, plot out
+    run_SA_pipeline       — full pipeline: two dataframes in, one plot out
 
 Usage (command line):
-    python simulated_annealing.py \\
-        --mod  data/mod_results/0-0_98765.txt \\
-        --conn data/connections.csv \\
-        --min-weight 3 \\
+    python simulated_annealing.py \
+        --mod-url https://raw.githubusercontent.com/... \
+        --neuprint \
+        --min-weight 3 \
+        --plot-style heatmap \
         --save output_matrix
 
 Usage (as a library):
     import simulated_annealing as sa
-    results = sa.run_pipeline(mod_df, conn_df, min_weight=3, seed=42)
+    results = sa.run_SA_pipeline(mod_df, conn_df, min_weight=3, seed=42)
 """
 
 import argparse
@@ -37,7 +38,7 @@ import pandas as pd
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# COST FUNCTIONS  (matches notebook Cell 19)
+# COST FUNCTIONS
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compute_cost(A):
@@ -72,13 +73,13 @@ def delta_cost(A, i, j):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# SIMULATED ANNEALING  (matches notebook Cell 23)
+# SIMULATED ANNEALING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def estimate_T_init(A, module_boundaries, n_samples=500, accept_prob=0.80):
     """
-    Set T_init so that ~accept_prob of cost-increasing swaps are accepted
-    at the start. Uses: T = -mean(delta_E) / ln(accept_prob).
+    Set T_init so ~accept_prob of cost-increasing swaps are accepted at start.
+    Uses: T = -mean(delta_E) / ln(accept_prob).
     """
     eligible = [k for k in range(len(module_boundaries) - 1)
                 if module_boundaries[k+1] - module_boundaries[k] >= 2]
@@ -171,18 +172,30 @@ def simulated_annealing(A, module_boundaries, n_iter=None, T_init=None,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# VISUALIZATION  (matches notebook Cell 31)
+# VISUALIZATION
 # ══════════════════════════════════════════════════════════════════════════════
 
 def plot_adjacency_matrix(A, module_labels, module_boundaries,
                           dot_mode=False, max_dot_size=80,
-                          mod_colors=None, title='Adjacency matrix (SA-ordered)',
+                          mod_colors=None, show_legend=False,
+                          title='Adjacency matrix (SA-ordered)',
                           save_path=None, figsize=(10, 9)):
     """
     Plot an SA-optimized adjacency matrix.
 
-    Heatmap mode (default): log scale visually, actual weights on colorbar ticks.
-    Dot mode: each connection is a dot sized by actual weight (top 25% only).
+    Parameters
+    ----------
+    A                 : (n,n) SA-optimized adjacency matrix
+    module_labels     : (n,) module label per neuron position
+    module_boundaries : block-boundary indices
+    dot_mode          : if True, scatter plot with dot size proportional to weight (top 25%)
+                        if False (default), heatmap with log scale
+    max_dot_size      : max dot area in dot mode
+    mod_colors        : list of colours per module; None = tab10 qualitative
+    show_legend       : if True, show module legend in upper right (default False)
+    title             : figure title
+    save_path         : save figure here if given (include extension)
+    figsize           : (width, height) in inches
     """
     n         = A.shape[0]
     n_modules = len(module_boundaries) - 1
@@ -194,7 +207,6 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
                           for _ in range(module_boundaries[k+1] - module_boundaries[k])],
                          dtype=float)
 
-    # Wider colorbar column and more wspace so "Synaptic weight" label is not cut off
     fig = plt.figure(figsize=figsize)
     gs  = fig.add_gridspec(2, 3,
                            width_ratios=[0.025, 1, 0.06],
@@ -235,35 +247,34 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
         ax_main.set_ylabel('Postsynaptic neuron (ordered)', fontsize=11, labelpad=12)
     else:
         ax_main.set_yticks([])
-        disp = np.log1p(A.copy())
+        # Linear colour scale with actual weight values — no log transform
+        actual_weights = A[A > 0]
+        w_max = np.percentile(actual_weights, 99) if len(actual_weights) > 0 else 1.0
+
+        disp = A.copy().astype(float)
         disp[disp == 0] = np.nan
-        nonzero_vals = disp[~np.isnan(disp)]
-        vmax = np.percentile(nonzero_vals, 90) if len(nonzero_vals) > 0 else None
-        # Truncate colormap to skip near-white shades — weakest connections
-        # start at a visible pink rather than barely distinguishable from white
         rdpu_truncated = LinearSegmentedColormap.from_list(
             'RdPu_truncated', plt.cm.RdPu(np.linspace(0.15, 1.0, 256))
         )
         im   = ax_main.imshow(disp, aspect='auto', cmap=rdpu_truncated,
                               interpolation='none', origin='upper',
-                              vmin=0, vmax=vmax)
-        cbar = fig.colorbar(im, cax=ax_cbar)
-        tick_locs   = cbar.get_ticks()
-        tick_labels = [f'{np.expm1(t):.0f}' for t in tick_locs]
-        cbar.set_ticks(tick_locs)
-        cbar.set_ticklabels(tick_labels)
+                              vmin=0, vmax=w_max)
+        cbar = fig.colorbar(im, cax=ax_cbar, extend='max')
         cbar.set_label('Synaptic weight', fontsize=10, labelpad=15)
 
+    # Module boundaries
     bkw = dict(color='black', linewidth=1.5, linestyle='-')
     for b in module_boundaries[1:-1]:
         ax_main.axhline(b - 0.5, **bkw);  ax_main.axvline(b - 0.5, **bkw)
         ax_top.axvline(b - 0.5, **bkw);   ax_left.axhline(b - 0.5, **bkw)
 
-    mod_ids = [module_labels[module_boundaries[k]] for k in range(n_modules)]
-    patches = [mpatches.Patch(color=mod_colors[k], label=f'Module {mod_ids[k]}')
-               for k in range(n_modules)]
-    ax_main.legend(handles=patches, loc='upper left', fontsize=8,
-                   framealpha=0.85, title='Module', title_fontsize=9)
+    # Module legend — off by default, shown upper right if show_legend=True
+    if show_legend:
+        mod_ids = [module_labels[module_boundaries[k]] for k in range(n_modules)]
+        patches = [mpatches.Patch(color=mod_colors[k], label=f'Module {mod_ids[k]}')
+                   for k in range(n_modules)]
+        ax_main.legend(handles=patches, loc='upper right', fontsize=8,
+                       framealpha=0.85, title='Module', title_fontsize=9)
 
     ax_main.set_xlabel('Presynaptic neuron (ordered)', fontsize=11)
     ax_top.set_title(title, fontsize=12, pad=6)
@@ -276,51 +287,104 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# COLUMN NAME NORMALISATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _normalise_mod_df(df):
+    """
+    Accept mod_df regardless of column names.
+    First column = node IDs, second column = module labels.
+    """
+    df = df.copy()
+    df.columns = ['id', 'module'] + list(df.columns[2:])
+    df['id']     = df['id'].astype(int)
+    df['module'] = df['module'].astype(int)
+    return df[['id', 'module']]
+
+
+def _normalise_conn_df(df):
+    """
+    Accept conn_df regardless of column names.
+    Detects pre/post/weight columns by trying common names,
+    then falls back to first/second/third column positions.
+    """
+    df = df.copy()
+    pre_candidates    = ['bodyId_pre',  'pre',  'pre_id',   'source']
+    post_candidates   = ['bodyId_post', 'post', 'post_id',  'target']
+    weight_candidates = ['weight', 'weights', 'syn_count', 'count']
+
+    def find_col(candidates, df):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        return None
+
+    pre_col    = find_col(pre_candidates, df)
+    post_col   = find_col(post_candidates, df)
+    weight_col = find_col(weight_candidates, df)
+
+    cols = list(df.columns)
+    if pre_col    is None: pre_col    = cols[0]
+    if post_col   is None: post_col   = cols[1]
+    if weight_col is None: weight_col = cols[2]
+
+    df = df[[pre_col, post_col, weight_col]].copy()
+    df.columns = ['pre', 'post', 'weight']
+    return df
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FULL PIPELINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_pipeline(mod_df, conn_df, min_weight=1,
-                 max_dot_size=80, mod_colors=None, polar_cmap=False,
-                 n_iter=None, T_init=None, T_final=1e-3, seed=42,
-                 title='Adjacency matrix (SA-optimized)', save_path=None,
-                 verbose=True):
+def run_SA_pipeline(mod_df, conn_df, min_weight=1,
+                    plot_style='heatmap', max_dot_size=80,
+                    mod_colors=None, polar_cmap=False, show_legend=False,
+                    n_iter=None, T_init=None, T_final=1e-3, seed=42,
+                    title='Adjacency matrix (SA-optimized)',
+                    save_path=None, verbose=True):
     """
-    Full pipeline: two dataframes in, both plots out (heatmap + dot plot).
+    Full SA pipeline: two dataframes in, one matrix visualization out.
 
     Parameters
     ----------
-    mod_df      : DataFrame with columns ['id', 'module']
-    conn_df     : DataFrame with columns ['bodyId_pre', 'bodyId_post', 'weight']
-                  (or ['pre', 'post', 'weight'] — both accepted)
+    mod_df      : DataFrame with node IDs (col 1) and module labels (col 2).
+                  Column names do not matter — first two columns are used.
+    conn_df     : DataFrame with pre IDs, post IDs, and weights.
+                  Common column names are detected automatically
+                  (bodyId_pre/post, pre/post, source/target, etc.).
+                  Falls back to first three columns if names are unrecognised.
     min_weight  : discard edges below this threshold
-    max_dot_size: max dot size in dot plot
+    plot_style  : 'heatmap' (default) or 'dot'
+                  'heatmap' — log scale, actual weights on colorbar ticks
+                  'dot'     — scatter plot, dot size proportional to weight (top 25%)
+    max_dot_size: max dot area in dot mode
     mod_colors  : explicit colour list per module; overrides polar_cmap
     polar_cmap  : use HSV cyclic colourmap if True
+    show_legend : if True, show module legend in upper right (default False)
     n_iter      : SA iterations (None = auto-scale with n)
     T_init      : initial temperature (None = auto-estimate)
     T_final     : final temperature
     seed        : random seed
-    title       : base title for both plots
-    save_path   : if given, saves heatmap to this path and dot plot to
-                  the same path with _dots appended before .png
+    title       : plot title
+    save_path   : save figure here if given (include extension)
     verbose     : print SA progress
 
     Returns
     -------
     dict: A_optimized, module_labels, module_boundaries, cost_history
     """
-    # Normalise column names — accept bodyId_pre/bodyId_post or pre/post
-    conn = conn_df.copy()
-    conn = conn.rename(columns={'bodyId_pre': 'pre', 'bodyId_post': 'post'})
-    conn = conn[['pre', 'post', 'weight']]
-    conn = conn[conn['weight'] >= min_weight].reset_index(drop=True)
+    # Normalise column names
+    mod_df  = _normalise_mod_df(mod_df)
+    conn_df = _normalise_conn_df(conn_df)
+    conn_df = conn_df[conn_df['weight'] >= min_weight].reset_index(drop=True)
 
     # Build adjacency matrix
     node_ids  = mod_df['id'].values
     id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
     n         = len(node_ids)
     A         = np.zeros((n, n), dtype=float)
-    for _, row in conn.iterrows():
+    for _, row in conn_df.iterrows():
         pre, post, w = row['pre'], row['post'], row['weight']
         if pre in id_to_idx and post in id_to_idx:
             A[id_to_idx[pre], id_to_idx[post]] += w
@@ -353,19 +417,11 @@ def run_pipeline(mod_df, conn_df, min_weight=1,
     else:
         colors = mod_colors
 
-    # Plot 1: heatmap
+    dot_mode = (plot_style == 'dot')
     plot_adjacency_matrix(A_opt, module_labels, module_bounds,
-                          dot_mode=False, mod_colors=colors,
-                          title=title + ' (heatmap)',
-                          save_path=save_path)
-
-    # Plot 2: dot plot
-    dot_save = save_path.replace('.png', '_dots.png') if save_path else None
-    plot_adjacency_matrix(A_opt, module_labels, module_bounds,
-                          dot_mode=True, max_dot_size=max_dot_size,
-                          mod_colors=colors,
-                          title=title + ' (dot size ∝ weight)',
-                          save_path=dot_save)
+                          dot_mode=dot_mode, max_dot_size=max_dot_size,
+                          mod_colors=colors, show_legend=show_legend,
+                          title=title, save_path=save_path)
 
     return dict(A_optimized=A_opt, module_labels=module_labels,
                 module_boundaries=module_bounds, cost_history=cost_hist)
@@ -379,32 +435,31 @@ def _parse_args():
     p = argparse.ArgumentParser(
         description='Adjacency matrix ordering with within-module simulated annealing.'
     )
-    # Module assignment file (either local path or URL)
     mod_group = p.add_mutually_exclusive_group(required=True)
     mod_group.add_argument('--mod',
                    help='Module assignment file (.txt space-sep or .csv)')
     mod_group.add_argument('--mod-url',
                    help='URL to module assignment file (e.g. raw GitHub URL)')
 
-    # Connections: either a CSV file OR fetch from Neuprint
     conn_group = p.add_mutually_exclusive_group(required=True)
     conn_group.add_argument('--conn',
-                   help='Connections CSV file (bodyId_pre, bodyId_post, weight)')
+                   help='Connections CSV file')
     conn_group.add_argument('--neuprint', action='store_true',
                    help='Fetch connections from Neuprint using NEUPRINT_TOKEN env variable')
 
-    p.add_argument('--dataset',    default='hemibrain:v1.2.1',
-                   help='Neuprint dataset (default: hemibrain:v1.2.1)')
-    p.add_argument('--min-weight', type=int,   default=3)
-    p.add_argument('--n-iter',     type=int,   default=None)
-    p.add_argument('--T-init',     type=float, default=None)
-    p.add_argument('--T-final',    type=float, default=1e-3)
-    p.add_argument('--seed',       type=int,   default=42)
-    p.add_argument('--polar-cmap', action='store_true')
-    p.add_argument('--save',       default=None,
+    p.add_argument('--dataset',     default='hemibrain:v1.2.1')
+    p.add_argument('--min-weight',  type=int,   default=3)
+    p.add_argument('--plot-style',  default='heatmap', choices=['heatmap', 'dot'])
+    p.add_argument('--show-legend', action='store_true')
+    p.add_argument('--n-iter',      type=int,   default=None)
+    p.add_argument('--T-init',      type=float, default=None)
+    p.add_argument('--T-final',     type=float, default=1e-3)
+    p.add_argument('--seed',        type=int,   default=42)
+    p.add_argument('--polar-cmap',  action='store_true')
+    p.add_argument('--save',        default=None,
                    help='Output filename prefix (without extension)')
-    p.add_argument('--title',      default='Adjacency matrix (SA-optimized)')
-    p.add_argument('--quiet',      action='store_true')
+    p.add_argument('--title',       default='Adjacency matrix (SA-optimized)')
+    p.add_argument('--quiet',       action='store_true')
     return p.parse_args()
 
 
@@ -434,28 +489,20 @@ if __name__ == '__main__':
             continue
     if mod_df is None:
         raise ValueError("Could not parse module file.")
-    mod_df = mod_df.iloc[:, :2].copy()
-    mod_df.columns = ['id', 'module']
-    mod_df['id']     = mod_df['id'].astype(int)
-    mod_df['module'] = mod_df['module'].astype(int)
-    print(f"Loaded {len(mod_df):,} neurons across {mod_df['module'].nunique()} modules.")
+    print(f"Loaded {len(mod_df):,} neurons across {mod_df.iloc[:, 1].nunique()} modules.")
 
     # ── Load connections ──────────────────────────────────────────────────────
     if args.neuprint:
-        import subprocess
+        import subprocess, os
         subprocess.run(['pip', 'install', 'neuprint-python', '-q'], check=True)
-        import os
         from neuprint import Client, fetch_simple_connections
         token = os.environ.get('NEUPRINT_TOKEN')
         if not token:
-            raise ValueError(
-                "NEUPRINT_TOKEN environment variable not set. "
-                "Set it with: import os; os.environ['NEUPRINT_TOKEN'] = 'your_token'"
-            )
+            raise ValueError("NEUPRINT_TOKEN environment variable not set.")
         print(f"Connecting to Neuprint ({args.dataset})...")
         c = Client('neuprint.janelia.org', dataset=args.dataset, token=token)
         conn_df = fetch_simple_connections(
-            mod_df['id'], mod_df['id'], min_weight=args.min_weight
+            mod_df.iloc[:, 0], mod_df.iloc[:, 0], min_weight=args.min_weight
         )
         conn_df = conn_df[['bodyId_pre', 'bodyId_post', 'weight']].copy()
         print(f"Fetched {len(conn_df):,} connections from Neuprint.")
@@ -466,9 +513,11 @@ if __name__ == '__main__':
     # ── Run pipeline ──────────────────────────────────────────────────────────
     save_path = f'{args.save}.png' if args.save else None
 
-    run_pipeline(
+    run_SA_pipeline(
         mod_df, conn_df,
         min_weight=args.min_weight,
+        plot_style=args.plot_style,
+        show_legend=args.show_legend,
         polar_cmap=args.polar_cmap,
         n_iter=args.n_iter,
         T_init=args.T_init,
