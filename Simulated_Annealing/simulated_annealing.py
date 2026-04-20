@@ -290,7 +290,7 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
 # COLUMN NAME NORMALISATION
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _normalise_mod_df(df):
+def _col_names_mod_df(df):
     """
     Accept mod_df regardless of column names.
     First column = node IDs, second column = module labels.
@@ -302,7 +302,7 @@ def _normalise_mod_df(df):
     return df[['id', 'module']]
 
 
-def _normalise_conn_df(df):
+def _col_names_conn_df(df):
     """
     Accept conn_df regardless of column names.
     Detects pre/post/weight columns by trying common names,
@@ -374,9 +374,9 @@ def run_SA_pipeline(mod_df, conn_df, min_weight=1,
     -------
     dict: A_optimized, module_labels, module_boundaries, cost_history
     """
-    # Normalise column names
-    mod_df  = _normalise_mod_df(mod_df)
-    conn_df = _normalise_conn_df(conn_df)
+    # Standardise column names
+    mod_df  = _col_names_mod_df(mod_df)
+    conn_df = _col_names_conn_df(conn_df)
     conn_df = conn_df[conn_df['weight'] >= min_weight].reset_index(drop=True)
 
     # Build adjacency matrix
