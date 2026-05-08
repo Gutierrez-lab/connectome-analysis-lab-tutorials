@@ -11,15 +11,36 @@ input's own outputs, where does the target rank?*
     rank 1 = secondary, rank 2 = tertiary, ...
     tied partners share a rank.
 
+In addition, the pipeline computes a **dedication proportion** for each
+source-target pair:
+
+    dedication = weight(source -> target) / total_weight_leaving(source)
+
+This proportion (0-1) captures how much of a source's total outgoing
+connectivity is dedicated to this specific target. Two sources can both be
+primary (rank 0), but one might dedicate 40% of its output while the other
+dedicates only 5%.
+
 The pipeline does NOT know about Neuprint, FlyWire, BANC, or any specific
 dataset. The caller supplies two `fetch` functions that return a DataFrame
-with a unified schema. See the docstring of `compute_primacy` for details.
+with a unified schema, OR passes a connections DataFrame directly.
+See the docstrings of `compute_primacy` and `compute_primacy_from_df`.
 
 Based on the `primacy` loop in "Hub Bespoke Figures" (G.J. Gutierrez,
 R. Weber Langstaff, Gutierrez Lab).
 
 Usage
 -----
+    # Option 1: Pass a DataFrame directly (FAFB, BANC, any CSV-based dataset)
+    from primacy_pipeline import compute_primacy_from_df
+
+    conn = pd.read_csv('connections.csv')
+    primacy = compute_primacy_from_df(
+        conn, target='oviIN',
+        target_mode='type', pre_mode='type', min_weight=3,
+    )
+
+    # Option 2: Write custom fetch wrappers (Neuprint, APIs, etc.)
     from primacy_pipeline import compute_primacy
 
     def my_fetch_inputs(target, min_weight, target_mode):
@@ -190,14 +211,18 @@ def compute_primacy(
     Returns
     -------
     DataFrame with columns:
-        source            — bodyId or cell type of the input
-        target            — bodyId or cell type of the target (per row when
-                            combine_targets=False; the full group label otherwise)
-        weight_to_target  — weight from source onto this target (or aggregated group)
-        rank              — 0 = primary, 1 = secondary, ... (ties share)
-        n_partners        — distinct postsynaptic partners this source has
-        top_partner       — the partner that actually ranked #0
-        top_weight        — weight of that top partner
+        source                — bodyId or cell type of the input
+        target                — bodyId or cell type of the target (per row when
+                                combine_targets=False; the full group label otherwise)
+        weight_to_target      — weight from source onto this target (or aggregated group)
+        rank                  — 0 = primary, 1 = secondary, ... (ties share)
+        n_partners            — distinct postsynaptic partners this source has
+        top_partner           — the partner that actually ranked #0
+        top_weight            — weight of that top partner
+        total_outgoing_weight — sum of all weights leaving this source
+        dedication_proportion — weight_to_target / total_outgoing_weight (0-1);
+                                how much of the source's output is dedicated to
+                                this target
     """
     # ── Resolve defaults ──
     if inner_min_weight is None:
@@ -317,7 +342,9 @@ def compute_primacy(
             records.append(dict(source=source, target=this_target,
                                 weight_to_target=row['weight_to_target'],
                                 rank=np.nan, n_partners=0,
-                                top_partner=None, top_weight=np.nan))
+                                top_partner=None, top_weight=np.nan,
+                                total_outgoing_weight=0,
+                                dedication_proportion=np.nan))
             continue
 
         # Which rows count as "the target" for this record
@@ -334,6 +361,16 @@ def compute_primacy(
         else:
             rank = np.nan
 
+        # Dedication proportion: weight to target / total outgoing weight
+        total_out = float(outs['weight'].sum())
+        if len(matches) and total_out > 0:
+            if combine_targets:
+                dedication = float(matches['weight'].sum()) / total_out
+            else:
+                dedication = float(matches['weight'].iloc[0]) / total_out
+        else:
+            dedication = np.nan
+
         top_row = outs.iloc[0]
         records.append(dict(
             source=source,
@@ -343,6 +380,8 @@ def compute_primacy(
             n_partners=len(outs),
             top_partner=top_row[target_key],
             top_weight=float(top_row['weight']),
+            total_outgoing_weight=total_out,
+            dedication_proportion=dedication,
         ))
 
         if verbose and (i + 1) % 50 == 0:
@@ -355,6 +394,12 @@ def compute_primacy(
               f"as primary output ({100*n_primary/len(primacy):.1f}%).")
         if n_errors:
             print(f"[warn] {n_errors} sources failed during fetch_outputs.")
+
+        # Dedication summary
+        ded = primacy['dedication_proportion'].dropna()
+        if len(ded):
+            print(f"[dedication] range: [{ded.min():.4f}, {ded.max():.4f}], "
+                  f"median: {ded.median():.4f}")
 
     # Final safety nets
     if len(primacy) and primacy['rank'].isna().all():
@@ -383,12 +428,17 @@ def check_fetch_output(df, where=''):
 
 def check_primacy_frame(primacy):
     required = ['source', 'target', 'weight_to_target', 'rank',
-                'n_partners', 'top_partner', 'top_weight']
+                'n_partners', 'top_partner', 'top_weight',
+                'total_outgoing_weight', 'dedication_proportion']
     for col in required:
         assert col in primacy.columns, f"primacy missing {col!r}"
     finite = primacy['rank'].dropna()
     assert (finite >= 0).all(), "negative rank(s)"
     assert (primacy['weight_to_target'] > 0).all(), "non-positive weight_to_target"
+    # Dedication proportion must be in [0, 1]
+    finite_ded = primacy['dedication_proportion'].dropna()
+    assert (finite_ded >= 0).all() and (finite_ded <= 1).all(), \
+        "dedication_proportion outside [0, 1]"
     # (source, target) pairs must be unique — source alone may repeat when
     # combine_targets=False (one row per target member)
     assert not primacy.duplicated(subset=['source', 'target']).any(), \
@@ -399,3 +449,88 @@ def check_ranks_present(primacy):
     ranks = primacy['rank'].dropna().astype(int).value_counts().sort_index()
     assert ranks.empty or 0 in ranks.index, "no primary (rank=0) sources found"
     return ranks
+
+
+# ═══ DataFrame-based entry point ═════════════════════════════════════════════
+
+def compute_primacy_from_df(
+    connections,
+    target,
+    *,
+    target_mode='neuron',
+    pre_mode='neuron',
+    combine_targets=None,
+    weight_agg='sum',
+    min_weight=3,
+    inner_min_weight=None,
+    exclude_self_loops=False,
+    verbose=True,
+):
+    """
+    Compute primacy directly from a connections DataFrame.
+
+    This is a convenience wrapper around `compute_primacy()`. Instead of
+    writing custom fetch_inputs / fetch_outputs callables, the user passes
+    a single DataFrame of all connections and the pipeline builds the fetch
+    functions internally by filtering that DataFrame.
+
+    Works with any dataset (Hemibrain, FAFB, BANC, etc.) as long as the
+    DataFrame has the required columns:
+        bodyId_pre, bodyId_post, type_pre, type_post, weight
+
+    Parameters
+    ----------
+    connections : DataFrame
+        Full edge list with REQUIRED_COLUMNS. Can be the whole connectome or
+        a pre-filtered subset — as long as it contains all edges relevant to
+        the target and its upstream sources' outputs.
+    target      : int/str or list — bodyId(s) or cell type(s)
+    target_mode, pre_mode, combine_targets, weight_agg, min_weight,
+    inner_min_weight, exclude_self_loops, verbose :
+        Passed through to `compute_primacy()`. See its docstring for details.
+
+    Returns
+    -------
+    DataFrame — same output as `compute_primacy()`.
+
+    Examples
+    --------
+    # From a CSV (FAFB, BANC, etc.)
+    conn = pd.read_csv('connections.csv')
+    primacy = compute_primacy_from_df(conn, target=12345, target_mode='neuron')
+
+    # Type-level
+    primacy = compute_primacy_from_df(
+        conn, target='oviIN', target_mode='type', pre_mode='type',
+    )
+    """
+    # Validate schema once up front
+    connections = validate_schema(connections, where='connections DataFrame')
+
+    # Resolve column names for filtering
+    target_col = 'bodyId_post' if target_mode == 'neuron' else 'type_post'
+    src_col    = 'bodyId_pre'  if pre_mode    == 'neuron' else 'type_pre'
+
+    def fetch_inputs(target_list, mw, tmode):
+        mask = connections[target_col].isin(target_list) & (connections['weight'] >= mw)
+        return connections.loc[mask].copy()
+
+    def fetch_outputs(source, mw, smode):
+        mask = connections[src_col] == source
+        if mw > 0:
+            mask = mask & (connections['weight'] >= mw)
+        return connections.loc[mask].copy()
+
+    return compute_primacy(
+        fetch_inputs,
+        fetch_outputs,
+        target,
+        target_mode=target_mode,
+        pre_mode=pre_mode,
+        combine_targets=combine_targets,
+        weight_agg=weight_agg,
+        min_weight=min_weight,
+        inner_min_weight=inner_min_weight,
+        exclude_self_loops=exclude_self_loops,
+        verbose=verbose,
+    )
