@@ -234,7 +234,8 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
         ax_main.yaxis.set_label_position('right')
         rows, cols = np.where(A > 0)
         weights    = A[rows, cols]          # actual synaptic weights
-        threshold  = np.percentile(weights, 75)
+        #threshold  = np.percentile(weights, 75)
+        threshold  = np.percentile(weights, 0) # don't threshold the weak weights
         mask       = weights >= threshold
         rows, cols, weights = rows[mask], cols[mask], weights[mask]
         w_min, w_max = weights.min(), weights.max()
@@ -244,7 +245,7 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
         ax_main.set_xlim(-0.5, n - 0.5)
         ax_main.set_ylim(n - 0.5, -0.5)
         ax_cbar.set_visible(False)
-        ax_main.set_ylabel('Postsynaptic neuron (ordered)', fontsize=11, labelpad=12)
+        ax_main.set_ylabel('Presynaptic (ordered)', fontsize=11, labelpad=12)
     else:
         ax_main.set_yticks([])
         # Linear colour scale with actual weight values — no log transform
@@ -276,7 +277,7 @@ def plot_adjacency_matrix(A, module_labels, module_boundaries,
         ax_main.legend(handles=patches, loc='upper right', fontsize=8,
                        framealpha=0.85, title='Module', title_fontsize=9)
 
-    ax_main.set_xlabel('Presynaptic neuron (ordered)', fontsize=11)
+    ax_main.set_xlabel('Postsynaptic (ordered)', fontsize=11)
     ax_top.set_title(title, fontsize=12, pad=6)
 
     if save_path:
